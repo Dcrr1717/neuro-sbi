@@ -44,7 +44,7 @@ def sbc_ranks(samples: FloatArray, theta: FloatArray) -> IntArray:
     """
     if samples.ndim != 3 or samples.shape[1:] != theta.shape:
         raise ValueError(f"shape mismatch: samples {samples.shape}, theta {theta.shape}")
-    return np.sum(samples < theta[None, :, :], axis=0).astype(np.int64)
+    return np.asarray(np.sum(samples < theta[None, :, :], axis=0), dtype=np.int64)
 
 
 def rank_bin_probabilities(num_samples: int, n_bins: int) -> FloatArray:
