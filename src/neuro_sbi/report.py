@@ -43,6 +43,8 @@ def render_report(m: dict[str, Any]) -> str:
     add(
         "- Wall-clock [s]: " + ", ".join(f"{k} {v:.1f}" for k, v in t.items()) + f" (workers: {m['workers']})"
     )
+    if m["training_data"].get("cached"):
+        add("- Training set and/or posterior loaded from cache; times are those of the original runs")
     add(f"- Versions: {', '.join(f'{k} {v}' for k, v in m['versions'].items())}\n")
 
     add("## Worked recovery (held-out observation, known ground truth)\n")

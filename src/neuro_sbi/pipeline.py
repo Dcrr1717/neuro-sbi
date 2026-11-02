@@ -64,13 +64,21 @@ def _cache_key(cfg: PipelineConfig) -> str:
 
 def simulate_training_set(
     cfg: PipelineConfig, space: ParameterSpace, workers: int, cache_dir: Path | None
-) -> tuple[FloatArray, FloatArray]:
-    """Draw ``theta ~ prior`` and simulate summary statistics (cached on disk)."""
+) -> tuple[FloatArray, FloatArray, dict[str, Any]]:
+    """Draw ``theta ~ prior`` and simulate summary statistics (cached on disk).
+
+    Returns ``(theta, x, info)``; ``info`` records whether the set came from
+    the cache and how long the original simulation took.
+    """
     path = cache_dir / f"train_{cfg.name}_{_cache_key(cfg)}.npz" if cache_dir else None
     if path is not None and path.exists():
         data = np.load(path)
         log.info("loaded cached training set %s", path)
-        return data["theta"], data["x"]
+        info: dict[str, Any] = {"cached": True}
+        if "seconds" in data:
+            info |= {"seconds": float(data["seconds"]), "workers": int(data["workers"])}
+        return data["theta"], data["x"], info
+    t0 = time.perf_counter()
     rng = np.random.default_rng(derive_seed(cfg.seed, "train-theta"))
     theta = space.sample_prior(cfg.num_simulations, rng)
     x, _ = simulate(
@@ -80,10 +88,11 @@ def simulate_training_set(
         chunk_size=cfg.chunk_size,
         workers=workers,
     )
+    seconds = time.perf_counter() - t0
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(path, theta=theta, x=x)
-    return theta, x
+        np.savez_compressed(path, theta=theta, x=x, seconds=seconds, workers=workers)
+    return theta, x, {"cached": False, "seconds": seconds, "workers": workers}
 
 
 def run(
@@ -128,14 +137,15 @@ def run(
 
     # 1. Training data ---------------------------------------------------------
     t0 = time.perf_counter()
-    theta, x = simulate_training_set(cfg, space, workers, cache)
-    timings["simulate_training"] = time.perf_counter() - t0
+    theta, x, sim_info = simulate_training_set(cfg, space, workers, cache)
+    timings["simulate_training"] = float(sim_info.get("seconds", time.perf_counter() - t0))
     metrics["training_data"] = {
+        **sim_info,
         "num_simulations": int(theta.shape[0]),
         "fraction_spiking": float(np.mean(x[:, 0] > 0)),
         "all_finite": bool(np.all(np.isfinite(x))),
     }
-    log.info("simulated %d training samples in %.1fs", theta.shape[0], timings["simulate_training"])
+    log.info("training set: %d simulations (%.1fs)", theta.shape[0], timings["simulate_training"])
 
     # 2. Train the amortized posterior ----------------------------------------
     t0 = time.perf_counter()
