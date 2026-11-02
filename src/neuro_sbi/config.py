@@ -27,6 +27,9 @@ class TrainingConfig:
     num_bins: int = 10  # spline bins (NSF only)
     training_batch_size: int = 256
     learning_rate: float = 5e-4
+    # Further phases after early stopping, each resumed at a smaller learning
+    # rate (annealing on plateau).
+    lr_decay: tuple[float, ...] = ()
     validation_fraction: float = 0.1
     stop_after_epochs: int = 20
     max_num_epochs: int = 1000
@@ -70,6 +73,7 @@ TINY = PipelineConfig(
         num_transforms=2,
         training_batch_size=64,
         learning_rate=1e-3,
+        lr_decay=(3e-4,),
         stop_after_epochs=3,
         max_num_epochs=5,
     ),
@@ -116,6 +120,7 @@ FULL = PipelineConfig(
         num_transforms=5,
         training_batch_size=512,
         learning_rate=5e-4,
+        lr_decay=(1e-4, 2e-5),
         stop_after_epochs=20,
         max_num_epochs=1000,
     ),

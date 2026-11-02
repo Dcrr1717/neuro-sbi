@@ -446,12 +446,25 @@ def recovery_plot(
     _save(fig, path)
 
 
-def training_curve(train: Sequence[float], val: Sequence[float], path: str | Path) -> None:
+def training_curve(
+    train: Sequence[float],
+    val: Sequence[float],
+    path: str | Path,
+    phase_ends: Sequence[int] = (),
+    learning_rates: Sequence[float] = (),
+) -> None:
+    """Mean log-density per epoch; dotted lines mark learning-rate decays."""
     set_style()
-    fig, ax = plt.subplots(figsize=(5.5, 3.4))
+    fig, ax = plt.subplots(figsize=(5.8, 3.5))
     ep = np.arange(1, len(train) + 1)
     ax.plot(ep, -np.asarray(train), color=CATEGORICAL[0], label="training")
     ax.plot(np.arange(1, len(val) + 1), -np.asarray(val), color=CATEGORICAL[1], label="validation")
+    lo = float(np.quantile(-np.asarray(val), 0.05))
+    hi = float(np.max(-np.asarray(val)))
+    ax.set_ylim(lo - 0.15 * (hi - lo), hi + 0.1 * (hi - lo))
+    for end, lr in zip(phase_ends[:-1], learning_rates[1:], strict=False):
+        ax.axvline(end + 0.5, color=MUTED, linestyle=":", linewidth=1.0)
+        ax.text(end + 1.5, lo - 0.1 * (hi - lo), f"lr → {lr:g}", fontsize=7.5, color=INK_2)
     ax.set_xlabel("epoch")
     ax.set_ylabel("mean log q(θ | x)")
     ax.grid(True, axis="y")

@@ -151,18 +151,34 @@ def train_npe(
         # sbi warns about outliers for raw-x z-scoring, which we do not use.
         warnings.filterwarnings("ignore", message=".*extreme outliers.*")
         inference.append_simulations(_as_tensor(theta), x_t)
-    estimator = inference.train(
-        training_batch_size=cfg.training_batch_size,
-        learning_rate=cfg.learning_rate,
-        validation_fraction=cfg.validation_fraction,
-        stop_after_epochs=cfg.stop_after_epochs,
-        max_num_epochs=cfg.max_num_epochs,
-        show_train_summary=False,
-    )
+    # Learning-rate annealing on plateau: train to early-stopping convergence,
+    # then resume with each smaller rate in ``cfg.lr_decay``. Every phase keeps
+    # the same train/validation split and restarts its patience counter;
+    # sbi restores the best-validation weights at the end of each phase.
+    phase_boundaries: list[int] = []
+    for phase, lr in enumerate((cfg.learning_rate, *cfg.lr_decay)):
+        if phase > 0:
+            if not hasattr(inference, "_epochs_since_last_improvement"):
+                raise RuntimeError("Unsupported sbi version: cannot resume training")
+            for group in inference.optimizer.param_groups:
+                group["lr"] = lr
+            inference._epochs_since_last_improvement = 0
+        estimator = inference.train(
+            training_batch_size=cfg.training_batch_size,
+            learning_rate=lr,
+            validation_fraction=cfg.validation_fraction,
+            stop_after_epochs=cfg.stop_after_epochs,
+            max_num_epochs=(inference.epoch if phase > 0 else 0) + cfg.max_num_epochs,
+            resume_training=phase > 0,
+            show_train_summary=False,
+        )
+        phase_boundaries.append(len(inference.summary["training_loss"]))
     posterior = inference.build_posterior(estimator)
     summary = inference.summary
     info: dict[str, Any] = {
-        "epochs_trained": int(summary["epochs_trained"][-1]),
+        "epochs_trained": len(summary["training_loss"]),
+        "phase_end_epochs": phase_boundaries,
+        "learning_rates": [cfg.learning_rate, *cfg.lr_decay],
         "best_validation_loss": float(summary["best_validation_loss"][-1]),
         "training_loss": [float(v) for v in summary["training_loss"]],
         "validation_loss": [float(v) for v in summary["validation_loss"]],
@@ -213,7 +229,7 @@ def load_posterior(path: str | Path) -> LoadedPosterior:
     if list(blob["features"]) != list(FEATURE_NAMES):
         raise ValueError("Posterior was trained on a different feature set")
     space = ParameterSpace(tuple(blob["inferred"]))
-    training = TrainingConfig(**blob["training"])
+    training = TrainingConfig(**{**blob["training"], "lr_decay": tuple(blob["training"].get("lr_decay", ()))})
     prior = space.prior()
     # The builder needs example batches to infer shapes; all standardization
     # statistics are buffers and are overwritten by the saved state dict.

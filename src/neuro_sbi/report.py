@@ -32,6 +32,12 @@ def render_report(m: dict[str, Any]) -> str:
         f"({tr['num_parameters']:,} weights); {tr['epochs_trained']} epochs, "
         f"best validation log q(θ|x) = {-tr['best_validation_loss']:.3f}"
     )
+    if len(tr.get("learning_rates", [])) > 1:
+        phases = ", ".join(
+            f"{lr:g} (until epoch {end})"
+            for lr, end in zip(tr["learning_rates"], tr["phase_end_epochs"], strict=True)
+        )
+        add(f"- Learning-rate annealing on plateau: {phases}")
     add(f"- Inferred parameters: {', '.join(m['parameter_labels'])}")
     t = m["timings_sec"]
     add(

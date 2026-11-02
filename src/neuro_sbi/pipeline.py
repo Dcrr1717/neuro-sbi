@@ -157,7 +157,13 @@ def run(
         "final_training_log_prob": -info["training_loss"][-1],
         "final_validation_log_prob": -info["validation_loss"][-1],
     }
-    plotting.training_curve(info["training_loss"], info["validation_loss"], fig_dir / "training_curve.png")
+    plotting.training_curve(
+        info["training_loss"],
+        info["validation_loss"],
+        fig_dir / "training_curve.png",
+        phase_ends=info.get("phase_end_epochs", ()),
+        learning_rates=info.get("learning_rates", ()),
+    )
     log.info("trained NPE for %d epochs in %.1fs", info["epochs_trained"], timings["train"])
 
     # 3. Worked recovery on a held-out observation ------------------------------
