@@ -325,6 +325,15 @@ def run(
             f"{g:.2f}": float(at(COVERAGE_LEVELS, joint_cov, g)) for g in (0.5, 0.8, 0.9, 0.95)
         },
         "joint_hpd_ks_pvalue": ks_alpha,
+        "joint_hpd_coverage_by_group": {
+            group: {"num": int(sel.sum())}
+            | {
+                f"{g:.2f}": float(at(COVERAGE_LEVELS, dg.hpd_coverage(alpha[sel], COVERAGE_LEVELS), g))
+                for g in (0.5, 0.8, 0.9, 0.95)
+            }
+            for group, sel in (("spiking", spiking), ("silent", ~spiking))
+            if int(sel.sum()) >= 2
+        },
     }
     metrics["recovery"] = {
         name: {key: float(val[j]) for key, val in rec.items()} for j, name in enumerate(space.names)
@@ -359,6 +368,15 @@ def run(
         rec["r"],
         fig_dir / "recovery.png",
         spiking=spiking,
+    )
+    np.savez_compressed(
+        out / "sbc.npz",
+        theta=theta_sbc,
+        x=x_sbc,
+        ranks=ranks,
+        hpd_level=alpha,
+        posterior_mean=samples_sbc.mean(axis=0),
+        posterior_sd=samples_sbc.std(axis=0),
     )
     log.info("SBC on %d simulations done in %.1fs", dcfg.num_sbc, timings["sbc"])
 

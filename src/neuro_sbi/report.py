@@ -96,8 +96,14 @@ def render_report(m: dict[str, Any]) -> str:
     add(
         f"\nJoint HPD coverage: 50 % → {jc['0.50']:.3f}, 80 % → {jc['0.80']:.3f}, "
         f"90 % → {jc['0.90']:.3f}, 95 % → {jc['0.95']:.3f} "
-        f"(KS test of HPD levels vs U(0,1): p = {sbc['joint_hpd_ks_pvalue']:.3f}).\n"
+        f"(KS test of HPD levels vs U(0,1): p = {sbc['joint_hpd_ks_pvalue']:.3f})."
     )
+    for group, c in sbc.get("joint_hpd_coverage_by_group", {}).items():
+        add(
+            f"- {group} cells (n = {c['num']}): 50 % → {c['0.50']:.3f}, 80 % → {c['0.80']:.3f}, "
+            f"90 % → {c['0.90']:.3f}, 95 % → {c['0.95']:.3f}"
+        )
+    add("")
 
     add("## Amortized recovery on the same held-out simulations\n")
     add("| parameter | contraction | r(mean, truth) | NRMSE | z mean | z sd | 95 % coverage |")

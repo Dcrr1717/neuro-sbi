@@ -40,7 +40,7 @@ def test_pipeline_writes_all_outputs(tiny_run: tuple[Path, dict[str, Any]]) -> N
     out, metrics = tiny_run
     for name in FIGURES:
         assert (out / "figures" / name).stat().st_size > 10_000, name
-    for name in ("metrics.json", "report.md", "posterior.pt", "training.json"):
+    for name in ("metrics.json", "report.md", "posterior.pt", "training.json", "sbc.npz"):
         assert (out / name).exists(), name
     assert json.loads((out / "metrics.json").read_text())["config"]["name"] == "tiny"
     assert "Simulation-based calibration" in (out / "report.md").read_text()
@@ -63,6 +63,20 @@ def test_pipeline_metrics_are_well_formed(tiny_run: tuple[Path, dict[str, Any]])
     assert sum(g["num"] for g in groups.values()) == m["sbc"]["num_sbc"]
     for g in groups.values():
         assert set(g["per_parameter"]) == set(names)
+    hpd_groups = m["sbc"]["joint_hpd_coverage_by_group"]
+    assert sum(g["num"] for g in hpd_groups.values()) == m["sbc"]["num_sbc"]
+    for g in hpd_groups.values():
+        assert all(0.0 <= g[level] <= 1.0 for level in ("0.50", "0.80", "0.90", "0.95"))
+
+
+def test_sbc_arrays_are_saved(tiny_run: tuple[Path, dict[str, Any]]) -> None:
+    out, m = tiny_run
+    data = np.load(out / "sbc.npz")
+    n, dim = m["sbc"]["num_sbc"], len(m["parameters"])
+    assert data["theta"].shape == data["ranks"].shape == data["posterior_mean"].shape == (n, dim)
+    assert data["x"].shape == (n, N_FEATURES)
+    assert np.all((data["hpd_level"] >= 0) & (data["hpd_level"] <= 1))
+    assert np.all((data["ranks"] >= 0) & (data["ranks"] <= m["sbc"]["posterior_samples"]))
 
 
 def test_reuse_posterior_reproduces_metrics(tiny_run: tuple[Path, dict[str, Any]]) -> None:

@@ -81,6 +81,21 @@ def _save(fig: Figure, path: str | Path) -> None:
     plt.close(fig)
 
 
+def posterior_limits(
+    samples: FloatArray, truth: FloatArray, bounds: FloatArray, pad: float = 0.15, tail: float = 1e-3
+) -> FloatArray:
+    """Per-parameter axis limits around the posterior mass and the truth.
+
+    The central ``1 - 2 * tail`` posterior interval, extended to include the
+    truth and padded by ``pad`` of its width, clipped to the prior bounds.
+    """
+    lo, hi = np.quantile(samples, [tail, 1.0 - tail], axis=0)
+    lo, hi = np.minimum(lo, truth), np.maximum(hi, truth)
+    width = np.maximum(hi - lo, 1e-3 * (bounds[:, 1] - bounds[:, 0]))
+    lim = np.stack([lo - pad * width, hi + pad * width], axis=1)
+    return np.asarray(np.clip(lim, bounds[:, :1], bounds[:, 1:]), dtype=np.float64)
+
+
 def pairplot(
     samples: FloatArray,
     truth: FloatArray,
@@ -89,11 +104,18 @@ def pairplot(
     path: str | Path,
     title: str = "",
     bins: int = 50,
+    zoom: bool = True,
 ) -> None:
-    """Posterior pairplot. Axis limits are the prior bounds, so the visible
-    shrinkage of each marginal is the information gained from the data."""
+    """Posterior pairplot.
+
+    With ``zoom`` the axes are fitted to the posterior (see
+    :func:`posterior_limits`) and each diagonal panel states which fraction
+    of the prior range it shows; otherwise the axis limits are the prior
+    bounds, so the visible shrinkage is the information gained from the data.
+    """
     set_style()
     d = samples.shape[1]
+    lim = posterior_limits(samples, truth, bounds) if zoom else np.asarray(bounds, dtype=np.float64)
     fig, axes = plt.subplots(d, d, figsize=(1.9 * d, 1.9 * d), squeeze=False)
     for i in range(d):
         for j in range(d):
@@ -102,7 +124,7 @@ def pairplot(
                 ax.axis("off")
                 continue
             if i == j:
-                edges = np.linspace(bounds[i, 0], bounds[i, 1], bins + 1)
+                edges = np.linspace(lim[i, 0], lim[i, 1], bins + 1)
                 ax.hist(samples[:, i], bins=edges, density=True, color=POSTERIOR, alpha=0.35)
                 ax.hist(
                     samples[:, i],
@@ -118,26 +140,30 @@ def pairplot(
                 ax.axvline(truth[i], color=TRUTH, linewidth=2.0)
                 ax.set_yticks([])
                 ax.spines["left"].set_visible(False)
-                ax.set_xlim(bounds[i])
+                ax.set_xlim(lim[i])
+                if zoom:
+                    frac = (lim[i, 1] - lim[i, 0]) / (bounds[i, 1] - bounds[i, 0])
+                    ax.set_title(f"axis: {100 * frac:.2g} % of prior range", fontsize=7.5, color=INK_2)
             else:
                 ax.hist2d(
                     samples[:, j],
                     samples[:, i],
                     bins=bins,
-                    range=[list(bounds[j]), list(bounds[i])],
+                    range=[list(lim[j]), list(lim[i])],
                     cmap=SEQUENTIAL,
+                    cmin=1,
                 )
                 ax.plot(
                     truth[j],
                     truth[i],
                     marker="o",
-                    markersize=7,
+                    markersize=6,
                     color=TRUTH,
                     markeredgecolor=SURFACE,
-                    markeredgewidth=1.5,
+                    markeredgewidth=1.2,
                 )
-                ax.set_xlim(bounds[j])
-                ax.set_ylim(bounds[i])
+                ax.set_xlim(lim[j])
+                ax.set_ylim(lim[i])
             if i == d - 1:
                 ax.set_xlabel(labels[j])
             else:
@@ -482,7 +508,7 @@ def training_curve(
     ax.set_xlabel("epoch")
     ax.set_ylabel("mean log q(θ | x)")
     ax.grid(True, axis="y")
-    ax.legend(loc="lower right")
+    ax.legend(loc="upper left")
     ax.set_title("NPE training curve", loc="left")
     fig.tight_layout()
     _save(fig, path)
