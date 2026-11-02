@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuro-sbi"
+version = "0.1.0"
+description = "Amortized simulation-based inference (NPE) for a Hodgkin-Huxley neuron, with SBC calibration"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Cesar Daniel Reinoso" }]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "torch>=2.0",
+    "sbi>=0.27,<0.28",  # API used: NPE, posterior_nn, DirectPosterior.sample_batched
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "mypy>=1.8", "ruff>=0.5"]
+
+[project.scripts]
+neuro-sbi = "neuro_sbi.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+neuro_sbi = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["sbi.*", "scipy.*", "nflows.*", "zuko.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "NPY", "RUF"]
+# RUF001-3: µ, ², τ, θ are intended. RUF046: int(round(x)) is kept for numpy scalars.
+ignore = ["RUF001", "RUF002", "RUF003", "RUF046"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["neuro_sbi.features.FeatureSettings"]
