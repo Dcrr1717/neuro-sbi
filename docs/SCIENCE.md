@@ -157,8 +157,12 @@ Implementation details (all via the `sbi` toolkit; Tejero-Cantero et al. 2020):
 * Features are standardised, with the heavy-tailed resting-potential SD
   log-transformed first. This preprocessing is a module *inside* the network,
   so the saved posterior accepts raw feature vectors.
-* 10 % of simulations are held out for early stopping (training stops after
-  20 epochs without validation improvement).
+* 10 % of simulations are held out for early stopping: a training phase ends
+  after 20 epochs without validation improvement and restores the best
+  weights. In the `full` configuration training then resumes from those
+  weights at a lower learning rate (5·10⁻⁴ → 10⁻⁴ → 2·10⁻⁵). The validation
+  log-density of a single learning rate is too noisy for the stopping rule to
+  see the slow, steady gains that the lower rates pick up.
 * The flow has unbounded support while the prior is a box; samples outside
   the prior are rejected, which is exactly the truncation the true posterior
   has.
@@ -268,6 +272,15 @@ statistical signature of **compensation**: different conductance combinations
 producing the same electrophysiology (Prinz et al. 2004; Gonçalves et al.
 2020). A point estimate would hide them; the posterior exposes them.
 
+The worked example in `posterior_pairplot.png` (axes zoomed to the posterior;
+each diagonal panel states how much of the prior range it shows) shows both
+regimes. The spike-generating parameters gNa, gK and VT are pinned to a few
+per cent of their prior range. In contrast, gleak, gM and Eleak spread along
+one curved ridge: less leak conductance is compensated by more M-current and
+a more depolarised leak reversal, which keeps the resting potential and the
+subthreshold input conductance unchanged. The recording constrains that
+combination, not the individual values.
+
 ## 7. Limitations
 
 * **Synthetic data.** All results here use simulated observations whose
@@ -282,9 +295,14 @@ producing the same electrophysiology (Prinz et al. 2004; Gonçalves et al.
 * **Prior dependence.** Weakly constrained parameters (low contraction) are
   dominated by their prior; their posteriors should not be over-interpreted.
 * **Estimator error.** NPE is only asymptotically exact. Finite simulation
-  budgets give approximation error, which is why the calibration checks are
-  run and reported rather than assumed. The `small` CI configuration is
-  deliberately under-budgeted and is expected to show some miscalibration.
+  budgets and finite training give approximation error, which is why the
+  calibration checks are run and reported rather than assumed. The committed
+  `full` posterior is slightly over-confident (its nominal 95 % joint region
+  covers the truth 90 % of the time; see [RESULTS.md](RESULTS.md)). Ensembles
+  of independently trained flows (Hermans et al. 2022) and balanced NPE
+  (Delaunoy et al. 2023) are the standard remedies. The `small` CI
+  configuration is deliberately under-budgeted and is expected to show some
+  miscalibration.
 
 ## References
 
@@ -292,6 +310,8 @@ producing the same electrophysiology (Prinz et al. 2004; Gonçalves et al.
   models using posterior quantiles. *J Comput Graph Stat* 15(3):675–692.
 * **Cranmer K, Brehmer J, Louppe G (2020). The frontier of simulation-based
   inference. *PNAS* 117(48):30055–30062. doi:10.1073/pnas.1912789117**
+* Delaunoy A, Miller BK, Forré P, Weniger C, Louppe G (2023). Balancing
+  simulation-based inference for conservative posteriors. arXiv:2304.10978.
 * Durkan C, Bekasov A, Murray I, Papamakarios G (2019). Neural spline flows.
   *NeurIPS* 32.
 * Gelman A, Meng X-L, Stern H (1996). Posterior predictive assessment of model

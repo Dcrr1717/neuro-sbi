@@ -28,6 +28,23 @@ The method, the model and how to read every diagnostic are explained for
 neuroscientists in **[docs/SCIENCE.md](docs/SCIENCE.md)**; the numbers of the
 committed run are in **[docs/RESULTS.md](docs/RESULTS.md)**.
 
+## Headline results (`full` run, 100k simulations)
+
+* **Worked recovery:** for a held-out recording, all six true parameters lie
+  inside their 95 % credible intervals. gNa, gK and VT are recovered to
+  within a few per cent.
+* **Posterior predictive check:** 98 % of posterior-predictive simulations
+  reproduce the observed spike count (prior: 7 %), and every feature falls at
+  a central predictive quantile (0.17–0.66).
+* **Calibration** (1000 held-out simulations): close to calibrated but
+  slightly over-confident. Marginal 95 % intervals cover the truth 91.5–93.7 %
+  of the time and the joint 95 % region 89.8 %. Five of six parameters pass
+  SBC rank uniformity; Eleak does not. Details and causes are in
+  [RESULTS.md §3](docs/RESULTS.md#3-calibration-sbc-and-expected-coverage).
+* **Identifiability:** in cells that fire, gNa, gK and VT are pinned down
+  (posterior contraction ≥ 0.998). gleak, gM and Eleak trade off along a
+  compensation ridge.
+
 ## Quick start
 
 ```bash
@@ -40,12 +57,14 @@ neuro-sbi run --config small        # default, ~1 min on 4 cores: whole pipeline
 ```
 
 ```bash
-neuro-sbi run --config full         # the committed run: 100k simulations, ~20-30 min on 4 cores
+neuro-sbi run --config full         # the committed run: 100k simulations, ~1.5 h on 4 cores
 ```
 
 Outputs go to `results/<config>/` (`results/` for `full`): figures in
-`figures/`, all numbers in `metrics.json`, a readable `report.md`, and the
-trained posterior `posterior.pt`.
+`figures/`, all numbers in `metrics.json`, a readable `report.md`, the
+per-simulation SBC ranks and HPD levels in `sbc.npz`, and the trained posterior
+`posterior.pt`. Most of the `full` time is network training (about 88 min);
+simulating the 100k training cells takes about 1.5 min.
 
 Amortized inference with the committed posterior — one simulation, no
 retraining:
@@ -61,8 +80,8 @@ import torch
 from neuro_sbi.inference import load_posterior
 
 loaded = load_posterior("results/posterior.pt")
-x_o = torch.tensor([...])            # 12 features, order: neuro_sbi.features.FEATURE_NAMES
-samples = loaded.posterior.sample((10_000,), x=x_o)   # log10 conductances, mV
+x_o = torch.tensor([...])  # 12 features, order: neuro_sbi.features.FEATURE_NAMES
+samples = loaded.posterior.sample((10_000,), x=x_o)  # log10 conductances, mV
 ```
 
 ## Configurations
@@ -92,13 +111,13 @@ src/neuro_sbi/
   plotting.py     figures
   pipeline.py     end-to-end pipeline;  cli.py  command-line interface
 tests/            offline pytest suite (tiny simulator)
-results/          committed full run: figures/, metrics.json, report.md, posterior.pt
+results/          committed full run: figures/, metrics.json, report.md, sbc.npz, posterior.pt
 docs/             SCIENCE.md (method), RESULTS.md (results)
 ```
 
 ## Quality
 
-* `pytest` — 30 offline tests, ~30 s: integrator vs. scipy reference, resting
+* `pytest` — 32 offline tests, ~30 s: integrator vs. scipy reference, resting
   state as exact fixed point, feature extraction on traces with analytically
   known features, diagnostics on a conjugate-Gaussian model with an exact
   posterior (calibrated, over-, under-confident and biased cases), posterior
