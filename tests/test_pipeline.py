@@ -59,6 +59,10 @@ def test_pipeline_metrics_are_well_formed(tiny_run: tuple[Path, dict[str, Any]])
     assert len(wr["marginals"]) == len(names)
     assert 0.0 <= wr["hpd_level_of_truth"] <= 1.0
     assert len(m["ppc"]["posterior"]) == N_FEATURES
+    groups = m["recovery_by_group"]
+    assert sum(g["num"] for g in groups.values()) == m["sbc"]["num_sbc"]
+    for g in groups.values():
+        assert set(g["per_parameter"]) == set(names)
 
 
 def test_reuse_posterior_reproduces_metrics(tiny_run: tuple[Path, dict[str, Any]]) -> None:

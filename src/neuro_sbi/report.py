@@ -105,6 +105,24 @@ def render_report(m: dict[str, Any]) -> str:
             f"| {m['parameter_labels'][j]} | {r['contraction']:.3f} | {r['r']:.3f} | {r['nrmse']:.3f} "
             f"| {r['z_mean']:+.3f} | {r['z_std']:.3f} | {r['coverage95']:.3f} |"
         )
+    groups = m.get("recovery_by_group", {})
+    if len(groups) == 2:
+        sp, si = groups["spiking"], groups["silent"]
+        add(
+            f"\nPosterior contraction split by response type "
+            f"({sp['num']} cells fired ≥ 1 AP, {si['num']} stayed silent):\n"
+        )
+        add(
+            "| parameter | contraction (spiking) | contraction (silent) "
+            "| 95 % cov. (spiking) | 95 % cov. (silent) |"
+        )
+        add("|---|---|---|---|---|")
+        for j, name in enumerate(m["recovery"]):
+            a_, b_ = sp["per_parameter"][name], si["per_parameter"][name]
+            add(
+                f"| {m['parameter_labels'][j]} | {a_['contraction']:.3f} | {b_['contraction']:.3f} "
+                f"| {a_['coverage95']:.3f} | {b_['coverage95']:.3f} |"
+            )
     add("")
     return "\n".join(lines)
 

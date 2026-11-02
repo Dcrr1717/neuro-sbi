@@ -415,14 +415,22 @@ def recovery_plot(
     contraction: FloatArray,
     r: FloatArray,
     path: str | Path,
+    spiking: NDArray[np.bool_] | None = None,
     max_points: int = 300,
 ) -> None:
-    """Posterior median and 90 % credible interval vs ground truth."""
+    """Posterior median and 90 % credible interval vs ground truth.
+
+    If ``spiking`` is given, cells that fired no AP during the stimulus are
+    drawn in grey: for them the spike-generating parameters are not
+    identifiable and their posteriors should revert towards the prior.
+    """
     set_style()
     d = theta.shape[1]
     m = min(max_points, theta.shape[0])
     med = np.median(samples[:, :m], axis=0)
     lo, hi = np.quantile(samples[:, :m], [0.05, 0.95], axis=0)
+    fired = np.ones(m, dtype=bool) if spiking is None else np.asarray(spiking[:m], dtype=bool)
+    groups = ((fired, POSTERIOR, "fired ≥ 1 AP"), (~fired, PRIOR, "silent (no AP)"))
     ncol = min(3, d)
     nrow = int(np.ceil(d / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(3.4 * ncol, 3.3 * nrow), squeeze=False)
@@ -432,8 +440,9 @@ def recovery_plot(
             ax.axis("off")
             continue
         ax.plot(bounds[j], bounds[j], color=MUTED, linestyle="--", linewidth=0.8)
-        ax.vlines(theta[:m, j], lo[:, j], hi[:, j], color=POSTERIOR, alpha=0.25, linewidth=0.8)
-        ax.plot(theta[:m, j], med[:, j], "o", markersize=3, color=POSTERIOR)
+        for sel, color, _ in groups:
+            ax.vlines(theta[:m, j][sel], lo[sel, j], hi[sel, j], color=color, alpha=0.25, linewidth=0.8)
+            ax.plot(theta[:m, j][sel], med[sel, j], "o", markersize=3, color=color)
         ax.set_xlim(bounds[j])
         ax.set_ylim(bounds[j])
         ax.set_aspect("equal")
@@ -442,6 +451,11 @@ def recovery_plot(
         if j % ncol == 0:
             ax.set_ylabel("posterior median (90 % CI)")
     fig.suptitle(f"Amortized parameter recovery on {m} held-out simulations", x=0.02, ha="left", fontsize=10)
+    if spiking is not None:
+        handles = [
+            Line2D([], [], color=c, marker="o", linestyle="", markersize=5, label=lab) for _, c, lab in groups
+        ]
+        fig.legend(handles=handles, loc="upper right", ncol=2, bbox_to_anchor=(0.99, 1.0))
     fig.tight_layout()
     _save(fig, path)
 

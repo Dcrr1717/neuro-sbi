@@ -231,7 +231,11 @@ acceptable failure mode.
   mean and truth, normalised RMSE, and the posterior z-score
   $(\mathbb{E}_\text{post}[\theta] - \theta^*)/\mathrm{SD}_\text{post}$, whose
   distribution should be mean 0, SD 1 (Schad, Betancourt & Vasishth 2021).
-  `recovery.png` plots posterior medians and 90 % intervals against the truth.
+  `recovery.png` plots posterior medians and 90 % intervals against the truth,
+  separately for cells that fired and cells that stayed silent: a silent
+  response carries almost no information about the spike-generating
+  parameters, and a correct posterior must then fall back towards the prior
+  rather than invent a confident answer.
 
 Contraction is what separates a useful posterior from a calibrated but
 uninformative one.

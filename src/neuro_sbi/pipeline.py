@@ -286,6 +286,12 @@ def run(
     joint_cov = dg.hpd_coverage(alpha, COVERAGE_LEVELS)
     ks_alpha = float(stats.kstest(alpha, "uniform").pvalue)
     rec = dg.recovery_metrics(samples_sbc, theta_sbc, bounds)
+    spiking = x_sbc[:, 0] > 0
+    rec_by_group = {
+        group: dg.recovery_metrics(samples_sbc[:, sel], theta_sbc[sel], bounds)
+        for group, sel in (("spiking", spiking), ("silent", ~spiking))
+        if int(sel.sum()) >= 2
+    }
     timings["sbc"] = time.perf_counter() - t0
 
     def at(levels: FloatArray, values: FloatArray, gamma: float) -> FloatArray:
@@ -313,6 +319,15 @@ def run(
     metrics["recovery"] = {
         name: {key: float(val[j]) for key, val in rec.items()} for j, name in enumerate(space.names)
     }
+    metrics["recovery_by_group"] = {
+        group: {
+            "num": int((spiking if group == "spiking" else ~spiking).sum()),
+            "per_parameter": {
+                name: {key: float(val[j]) for key, val in r.items()} for j, name in enumerate(space.names)
+            },
+        }
+        for group, r in rec_by_group.items()
+    }
     plotting.sbc_rank_histograms(
         ranks,
         dcfg.sbc_samples,
@@ -326,7 +341,14 @@ def run(
         COVERAGE_LEVELS, marg_cov, joint_cov, dcfg.num_sbc, labels, fig_dir / "coverage.png"
     )
     plotting.recovery_plot(
-        theta_sbc, samples_sbc, bounds, labels, rec["contraction"], rec["r"], fig_dir / "recovery.png"
+        theta_sbc,
+        samples_sbc,
+        bounds,
+        labels,
+        rec["contraction"],
+        rec["r"],
+        fig_dir / "recovery.png",
+        spiking=spiking,
     )
     log.info("SBC on %d simulations done in %.1fs", dcfg.num_sbc, timings["sbc"])
 
