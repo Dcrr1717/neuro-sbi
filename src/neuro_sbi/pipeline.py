@@ -26,12 +26,13 @@ from neuro_sbi.batch import default_workers, simulate
 from neuro_sbi.config import PipelineConfig
 from neuro_sbi.features import FEATURE_NAMES, FEATURE_UNITS
 from neuro_sbi.inference import (
+    ensemble_members,
     load_posterior,
     log_prob_unnormalized,
     sample,
     sample_batched,
     save_posterior,
-    train_npe,
+    train_ensemble,
 )
 from neuro_sbi.params import ParameterSpace
 from neuro_sbi.report import write_report
@@ -39,13 +40,22 @@ from neuro_sbi.report import write_report
 FloatArray = NDArray[np.float64]
 log = logging.getLogger("neuro_sbi")
 
-COVERAGE_LEVELS = np.linspace(0.0, 1.0, 51)
+# Credibility levels: a fine grid for the coverage plots, and the levels whose
+# coverage is reported (computed exactly, not read off the grid).
+COVERAGE_LEVELS = np.linspace(0.0, 1.0, 101)
+REPORT_LEVELS = (0.5, 0.8, 0.9, 0.95)
 
 
 def derive_seed(seed: int, stream: str) -> int:
     """Independent, reproducible integer seed for a named random stream."""
     ss = np.random.SeedSequence([seed, zlib.crc32(stream.encode())])
     return int(ss.generate_state(1, dtype=np.uint32)[0])
+
+
+def member_seed(seed: int, k: int) -> int:
+    """Training seed of ensemble member ``k``; member 0 uses the stream a
+    single-flow run has always used."""
+    return derive_seed(seed, "torch" if k == 0 else f"torch-{k}")
 
 
 def _cache_key(cfg: PipelineConfig) -> str:
@@ -158,23 +168,44 @@ def run(
         info = json.loads(info_path.read_text())
         log.info("reusing trained posterior %s", post_path)
     else:
-        posterior, info = train_npe(theta, x, space, cfg.training, derive_seed(cfg.seed, "torch"))
-        info["train_seconds"] = time.perf_counter() - t0
+        seeds = [member_seed(cfg.seed, k) for k in range(cfg.training.ensemble_size)]
+        posterior, member_info = train_ensemble(theta, x, space, cfg.training, seeds, workers=workers)
+        info = {"members": member_info, "train_seconds": time.perf_counter() - t0, "workers": workers}
         save_posterior(posterior, post_path, space, cfg.training, settings)
         info_path.write_text(json.dumps(info))
+    members_info: list[dict[str, Any]] = info["members"]
     timings["train"] = float(info["train_seconds"])
-    metrics["training"] = {k: v for k, v in info.items() if k not in ("training_loss", "validation_loss")} | {
-        "final_training_log_prob": -info["training_loss"][-1],
-        "final_validation_log_prob": -info["validation_loss"][-1],
+    metrics["training"] = {
+        "ensemble_size": len(members_info),
+        "num_parameters": sum(m["num_parameters"] for m in members_info),
+        "learning_rates": members_info[0]["learning_rates"],
+        "train_seconds": timings["train"],
+        "members": [
+            {
+                "seed": m["seed"],
+                "num_parameters": m["num_parameters"],
+                "epochs_trained": m["epochs_trained"],
+                "phase_end_epochs": m["phase_end_epochs"],
+                "best_validation_log_prob": -m["best_validation_loss"],
+                "final_training_log_prob": -m["training_loss"][-1],
+                "final_validation_log_prob": -m["validation_loss"][-1],
+            }
+            for m in members_info
+        ],
     }
     plotting.training_curve(
-        info["training_loss"],
-        info["validation_loss"],
+        [m["training_loss"] for m in members_info],
+        [m["validation_loss"] for m in members_info],
         fig_dir / "training_curve.png",
-        phase_ends=info.get("phase_end_epochs", ()),
-        learning_rates=info.get("learning_rates", ()),
+        phase_ends=[m["phase_end_epochs"] for m in members_info],
+        learning_rates=members_info[0]["learning_rates"],
     )
-    log.info("trained NPE for %d epochs in %.1fs", info["epochs_trained"], timings["train"])
+    log.info(
+        "trained %d flow(s) for %s epochs in %.1fs",
+        len(members_info),
+        "/".join(str(m["epochs_trained"]) for m in members_info),
+        timings["train"],
+    )
 
     # 3. Worked recovery on a held-out observation ------------------------------
     t0 = time.perf_counter()
@@ -297,6 +328,37 @@ def run(
     ks_alpha = float(stats.kstest(alpha, "uniform").pvalue)
     rec = dg.recovery_metrics(samples_sbc, theta_sbc, bounds)
     spiking = x_sbc[:, 0] > 0
+    bonferroni = 0.05 / space.dim
+    # Every member of an ensemble on its own, on the same simulations: shows
+    # what the mixture changes.
+    members = ensemble_members(posterior)
+    member_stats: list[dict[str, Any]] = []
+    member_joint_cov: list[FloatArray] = []
+    member_alpha: list[FloatArray] = []
+    member_ranks: list[NDArray[np.int64]] = []
+    for k, member in enumerate(members if len(members) > 1 else []):
+        torch.manual_seed(derive_seed(cfg.seed, f"sample-sbc-member-{k}"))
+        s_k = sample_batched(member, x_sbc, dcfg.sbc_samples)
+        r_k = dg.sbc_ranks(s_k, theta_sbc)
+        lq_truth_k = log_prob_unnormalized(member, theta_sbc[None], x_sbc)[0]
+        a_k = dg.hpd_levels(log_prob_unnormalized(member, s_k, x_sbc), lq_truth_k)
+        del s_k
+        jc_k = dg.hpd_coverage(a_k, COVERAGE_LEVELS)
+        tests_k = dg.rank_uniformity_tests(r_k, dcfg.sbc_samples, dcfg.sbc_bins, seed=cfg.seed)
+        member_stats.append(
+            {
+                "heldout_log_prob": float(np.mean(lq_truth_k)),
+                "joint_hpd_coverage": _joint_at_report_levels(a_k),
+                "joint_hpd_ks_pvalue": float(stats.kstest(a_k, "uniform").pvalue),
+                "marginal_coverage_95": _marginal_at_report_levels(r_k, dcfg.sbc_samples, space.names)[
+                    "0.95"
+                ],
+                "num_uniform_at_bonferroni": int(sum(t["ks_pvalue"] > bonferroni for t in tests_k)),
+            }
+        )
+        member_joint_cov.append(jc_k)
+        member_alpha.append(a_k)
+        member_ranks.append(r_k)
     rec_by_group = {
         group: dg.recovery_metrics(samples_sbc[:, sel], theta_sbc[sel], bounds)
         for group, sel in (("spiking", spiking), ("silent", ~spiking))
@@ -304,10 +366,6 @@ def run(
     }
     timings["sbc"] = time.perf_counter() - t0
 
-    def at(levels: FloatArray, values: FloatArray, gamma: float) -> FloatArray:
-        return np.asarray(values[int(np.argmin(np.abs(levels - gamma)))])
-
-    bonferroni = 0.05 / space.dim
     metrics["sbc"] = {
         "num_sbc": dcfg.num_sbc,
         "posterior_samples": dcfg.sbc_samples,
@@ -317,20 +375,13 @@ def run(
             for j, name in enumerate(space.names)
         },
         "bonferroni_threshold": bonferroni,
-        "marginal_coverage": {
-            f"{g:.2f}": dict(zip(space.names, map(float, at(COVERAGE_LEVELS, marg_cov, g)), strict=True))
-            for g in (0.5, 0.8, 0.9, 0.95)
-        },
-        "joint_hpd_coverage": {
-            f"{g:.2f}": float(at(COVERAGE_LEVELS, joint_cov, g)) for g in (0.5, 0.8, 0.9, 0.95)
-        },
+        "marginal_coverage": _marginal_at_report_levels(ranks, dcfg.sbc_samples, space.names),
+        "joint_hpd_coverage": _joint_at_report_levels(alpha),
         "joint_hpd_ks_pvalue": ks_alpha,
+        "heldout_log_prob": float(np.mean(lq_truth)),
+        "members": member_stats,
         "joint_hpd_coverage_by_group": {
-            group: {"num": int(sel.sum())}
-            | {
-                f"{g:.2f}": float(at(COVERAGE_LEVELS, dg.hpd_coverage(alpha[sel], COVERAGE_LEVELS), g))
-                for g in (0.5, 0.8, 0.9, 0.95)
-            }
+            group: {"num": int(sel.sum())} | _joint_at_report_levels(alpha[sel])
             for group, sel in (("spiking", spiking), ("silent", ~spiking))
             if int(sel.sum()) >= 2
         },
@@ -357,7 +408,13 @@ def run(
     )
     plotting.sbc_ecdf(ranks, dcfg.sbc_samples, labels, fig_dir / "sbc_ecdf.png")
     plotting.coverage_plot(
-        COVERAGE_LEVELS, marg_cov, joint_cov, dcfg.num_sbc, labels, fig_dir / "coverage.png"
+        COVERAGE_LEVELS,
+        marg_cov,
+        joint_cov,
+        dcfg.num_sbc,
+        labels,
+        fig_dir / "coverage.png",
+        member_joint=member_joint_cov,
     )
     plotting.recovery_plot(
         theta_sbc,
@@ -377,6 +434,9 @@ def run(
         hpd_level=alpha,
         posterior_mean=samples_sbc.mean(axis=0),
         posterior_sd=samples_sbc.std(axis=0),
+        # Per member of an ensemble (empty for a single flow).
+        member_ranks=np.asarray(member_ranks, dtype=np.int64).reshape(-1, *ranks.shape),
+        member_hpd_level=np.asarray(member_alpha, dtype=np.float64).reshape(-1, alpha.size),
     )
     log.info("SBC on %d simulations done in %.1fs", dcfg.num_sbc, timings["sbc"])
 
@@ -384,6 +444,21 @@ def run(
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
     write_report(metrics, out / "report.md")
     return metrics
+
+
+def _marginal_at_report_levels(
+    ranks: NDArray[np.int64], num_samples: int, names: tuple[str, ...]
+) -> dict[str, dict[str, float]]:
+    cov = dg.central_coverage(ranks, num_samples, np.asarray(REPORT_LEVELS))
+    return {
+        f"{g:.2f}": dict(zip(names, map(float, row), strict=True))
+        for g, row in zip(REPORT_LEVELS, cov, strict=True)
+    }
+
+
+def _joint_at_report_levels(alpha: FloatArray) -> dict[str, float]:
+    cov = dg.hpd_coverage(alpha, np.asarray(REPORT_LEVELS))
+    return {f"{g:.2f}": float(c) for g, c in zip(REPORT_LEVELS, cov, strict=True)}
 
 
 def _versions() -> dict[str, str]:

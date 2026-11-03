@@ -6,12 +6,21 @@ sum_i log q_phi(theta_i | x_i). Its optimum is the true posterior p(theta | x)
 for *every* x (Papamakarios & Murray 2016; Greenberg et al. 2019), so after
 training, inference on a new observation is a single forward pass -- no
 further simulations and no MCMC.
+
+A single flow trained on a finite budget tends to be over-confident
+(Hermans et al. 2022). Several flows trained from different random
+initializations are therefore combined into an equal-weight mixture, a *deep
+ensemble* (Lakshminarayanan et al. 2017): where the members disagree, the
+mixture is wider than any of them.
 """
 
 from __future__ import annotations
 
+import math
+import multiprocessing as mp
 import warnings
 from collections.abc import Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +30,9 @@ import torch
 from numpy.typing import NDArray
 from sbi.inference import NPE, DirectPosterior
 from sbi.neural_nets import posterior_nn
-from torch import nn
+from sbi.neural_nets.estimators import ConditionalDensityEstimator
+from sbi.utils import within_support
+from torch import Tensor, nn
 
 from neuro_sbi.config import TrainingConfig
 from neuro_sbi.features import FEATURE_NAMES
@@ -35,6 +46,10 @@ FloatArray = NDArray[np.float64]
 # firing ones).
 LOG_FEATURES: tuple[str, ...] = ("resting_std",)
 LOG_FLOOR = 1e-3
+
+# Rejection sampling to the prior support (see :func:`sample_batched`).
+MAX_PROPOSALS_PER_ROUND = 200_000
+MAX_PROPOSALS_PER_OBSERVATION = 20_000_000
 
 
 class FeatureStandardizer(nn.Module):
@@ -97,6 +112,56 @@ class NullTracker:
 
     def flush(self) -> None:
         pass
+
+
+class FlowEnsemble(ConditionalDensityEstimator):  # type: ignore[misc]  # sbi is untyped
+    """Equal-weight mixture of conditional density estimators.
+
+    ``q(theta | x) = (1/K) sum_k q_k(theta | x)``. Each draw picks a member
+    uniformly at random and samples from it, so samples are exact i.i.d. draws
+    from the mixture; ``log_prob`` is the log of the mixture density. Wrapped
+    in an ``sbi`` ``DirectPosterior``, the mixture is truncated to the prior
+    support as a whole by rejection sampling, exactly as a single flow is.
+    """
+
+    def __init__(self, members: Sequence[ConditionalDensityEstimator]) -> None:
+        if not members:
+            raise ValueError("An ensemble needs at least one member")
+        first = members[0]
+        if any(m.input_shape != first.input_shape for m in members) or any(
+            m.condition_shape != first.condition_shape for m in members
+        ):
+            raise ValueError("Ensemble members must share input and condition shapes")
+        super().__init__(nn.ModuleList(members), first.input_shape, first.condition_shape)
+
+    @property
+    def members(self) -> list[ConditionalDensityEstimator]:
+        return list(self.net)
+
+    def log_prob(self, input: Tensor, condition: Tensor, **kwargs: Any) -> Tensor:
+        lps = torch.stack([m.log_prob(input, condition, **kwargs) for m in self.net])
+        return torch.logsumexp(lps, dim=0) - math.log(len(self.net))
+
+    def loss(self, input: Tensor, condition: Tensor, **kwargs: Any) -> Tensor:
+        return -self.log_prob(input, condition, **kwargs)
+
+    def sample(self, sample_shape: torch.Size, condition: Tensor, **kwargs: Any) -> Tensor:
+        n = torch.Size(sample_shape).numel()
+        batch = condition.shape[0]
+        labels = torch.randint(len(self.net), (n, batch), device=condition.device)
+        out = torch.empty(n, batch, *self.input_shape, device=condition.device)
+        for k, member in enumerate(self.net):
+            mask = labels == k
+            need = int(mask.sum(dim=0).max())
+            if need == 0:
+                continue
+            # Draw as many samples per observation as the most-requested
+            # observation needs; observation b uses the first count_b of them.
+            draws = member.sample(torch.Size([need]), condition, **kwargs)
+            rank = torch.cumsum(mask, dim=0) - 1
+            i_idx, b_idx = mask.nonzero(as_tuple=True)
+            out[i_idx, b_idx] = draws[rank[i_idx, b_idx], b_idx]
+        return out.reshape(*sample_shape, batch, *self.input_shape)
 
 
 def _as_tensor(a: FloatArray) -> torch.Tensor:
@@ -187,6 +252,88 @@ def train_npe(
     return posterior, info
 
 
+def _train_member(
+    job: tuple[FloatArray, FloatArray, tuple[str, ...], TrainingConfig, int],
+) -> tuple[dict[str, Tensor], dict[str, Any]]:
+    """Train one ensemble member on a single CPU thread.
+
+    One thread is both the fastest setting for these small networks and what
+    makes a member's weights independent of how many members train in
+    parallel.
+    """
+    theta, x, inferred, cfg, seed = job
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        posterior, info = train_npe(theta, x, ParameterSpace(inferred), cfg, seed)
+    finally:
+        torch.set_num_threads(threads)
+    return posterior.posterior_estimator.state_dict(), info | {"seed": seed}
+
+
+def train_ensemble(
+    theta: FloatArray,
+    x: FloatArray,
+    space: ParameterSpace,
+    cfg: TrainingConfig,
+    seeds: Sequence[int],
+    workers: int = 1,
+) -> tuple[DirectPosterior, list[dict[str, Any]]]:
+    """Train ``len(seeds)`` flows that differ only in their random seed.
+
+    The members share the training set; the seed sets the initial weights,
+    the train/validation split and the mini-batch order. Members train in up
+    to ``workers`` processes and the result does not depend on ``workers``.
+
+    Returns:
+        The posterior (a single flow if there is one seed, otherwise their
+        :class:`FlowEnsemble`) and each member's training summary.
+    """
+    jobs = [(theta, x, space.names, cfg, int(seed)) for seed in seeds]
+    if not jobs:
+        raise ValueError("At least one seed is required")
+    if workers <= 1 or len(jobs) == 1:
+        results = [_train_member(job) for job in jobs]
+    else:
+        with ProcessPoolExecutor(
+            max_workers=min(workers, len(jobs)), mp_context=mp.get_context("spawn")
+        ) as pool:
+            results = list(pool.map(_train_member, jobs))
+    posterior = build_posterior(space, cfg, [state for state, _ in results])
+    return posterior, [info for _, info in results]
+
+
+def build_posterior(
+    space: ParameterSpace, training: TrainingConfig, state_dicts: Sequence[dict[str, Tensor]]
+) -> DirectPosterior:
+    """Rebuild a (single-flow or ensemble) posterior from member state dicts."""
+    prior = space.prior()
+    estimators = []
+    # Building a network draws initial weights from the global torch RNG;
+    # fork it so that rebuilding a posterior has no side effects.
+    with torch.random.fork_rng():
+        for state in state_dicts:
+            # The builder needs example batches to infer shapes; all
+            # standardization statistics are buffers, overwritten by the state.
+            dummy_theta = prior.sample((32,))
+            dummy_x = torch.rand(32, len(FEATURE_NAMES))
+            est = _builder(training, FeatureStandardizer())(dummy_theta, dummy_x)
+            est.load_state_dict(state)
+            est.eval()
+            estimators.append(est)
+    estimator = estimators[0] if len(estimators) == 1 else FlowEnsemble(estimators)
+    return DirectPosterior(posterior_estimator=estimator, prior=prior)
+
+
+def ensemble_members(posterior: DirectPosterior) -> list[DirectPosterior]:
+    """The individual flows of an ensemble posterior, each as a posterior
+    with the same prior (a single-flow posterior is its own only member)."""
+    est = posterior.posterior_estimator
+    if isinstance(est, FlowEnsemble):
+        return [DirectPosterior(posterior_estimator=m, prior=posterior.prior) for m in est.members]
+    return [posterior]
+
+
 @dataclass(frozen=True)
 class LoadedPosterior:
     """A trained posterior together with everything needed to use it."""
@@ -204,7 +351,7 @@ def save_posterior(
     training: TrainingConfig,
     simulation: SimulationSettings,
 ) -> None:
-    """Save the trained estimator as a plain ``state_dict`` plus metadata.
+    """Save the trained flow(s) as plain state dicts plus metadata.
 
     A state dict (rather than a pickled object) is loaded with
     ``torch.load(weights_only=True)``, which cannot execute arbitrary code.
@@ -213,7 +360,7 @@ def save_posterior(
     """
     torch.save(
         {
-            "state_dict": posterior.posterior_estimator.state_dict(),
+            "state_dicts": [m.posterior_estimator.state_dict() for m in ensemble_members(posterior)],
             "inferred": list(space.names),
             "training": asdict(training),
             "simulation": asdict(simulation),
@@ -230,16 +377,12 @@ def load_posterior(path: str | Path) -> LoadedPosterior:
         raise ValueError("Posterior was trained on a different feature set")
     space = ParameterSpace(tuple(blob["inferred"]))
     training = TrainingConfig(**{**blob["training"], "lr_decay": tuple(blob["training"].get("lr_decay", ()))})
-    prior = space.prior()
-    # The builder needs example batches to infer shapes; all standardization
-    # statistics are buffers and are overwritten by the saved state dict.
-    dummy_theta = prior.sample((32,))
-    dummy_x = torch.rand(32, len(FEATURE_NAMES))
-    estimator = _builder(training, FeatureStandardizer())(dummy_theta, dummy_x)
-    estimator.load_state_dict(blob["state_dict"])
-    estimator.eval()
+    # Files written before ensembles were supported hold a single "state_dict".
+    states = blob["state_dicts"] if "state_dicts" in blob else [blob["state_dict"]]
+    if len(states) != training.ensemble_size:
+        raise ValueError(f"{path}: {len(states)} flows stored, ensemble_size is {training.ensemble_size}")
     return LoadedPosterior(
-        posterior=DirectPosterior(posterior_estimator=estimator, prior=prior),
+        posterior=build_posterior(space, training, states),
         space=space,
         simulation=SimulationSettings(**blob["simulation"]),
         training=training,
@@ -248,19 +391,51 @@ def load_posterior(path: str | Path) -> LoadedPosterior:
 
 def sample(posterior: DirectPosterior, x: FloatArray, n: int) -> FloatArray:
     """Draw ``n`` posterior samples for a single observation ``x``."""
-    s = posterior.sample((n,), x=_as_tensor(x).reshape(1, -1), show_progress_bars=False)
-    return np.asarray(s.detach().cpu().numpy(), dtype=np.float64)
+    return sample_batched(posterior, np.asarray(x).reshape(1, -1), n)[:, 0]
 
 
+@torch.no_grad()
 def sample_batched(posterior: DirectPosterior, xs: FloatArray, n: int) -> FloatArray:
     """Draw ``n`` posterior samples for each of many observations.
 
+    Samples are drawn from the flow (or ensemble) and rejected outside the
+    prior support, so they follow the flow truncated to the prior, as in
+    ``sbi``. Unlike ``sbi``'s batched sampler, each round proposes only for
+    the observations that still lack samples, with a batch sized by their
+    acceptance rate so far. One observation whose posterior lies mostly
+    outside the prior therefore does not hold up all the others.
+
     Returns an array of shape ``(n, num_observations, dim)``.
     """
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*max_sampling_batch_size.*")
-        s = posterior.sample_batched((n,), x=_as_tensor(xs), show_progress_bars=False)
-    return np.asarray(s.detach().cpu().numpy(), dtype=np.float64)
+    est = posterior.posterior_estimator
+    x = _as_tensor(xs).reshape(np.shape(xs)[0], -1)
+    num_obs = x.shape[0]
+    out = torch.empty(n, num_obs, *est.input_shape)
+    filled = torch.zeros(num_obs, dtype=torch.long)
+    proposed = torch.zeros(num_obs, dtype=torch.long)
+    accepted = torch.zeros(num_obs, dtype=torch.long)
+    todo = torch.arange(num_obs)
+    while todo.numel() > 0:
+        rate = (accepted[todo] + 1) / (proposed[todo] + 1)
+        wanted = float(torch.max(1.1 * (n - filled[todo]) / rate))
+        per_obs = int(min(max(wanted, 1.0), max(1, MAX_PROPOSALS_PER_ROUND // todo.numel())))
+        cand = est.sample(torch.Size([per_obs]), x[todo])  # (per_obs, len(todo), dim)
+        ok = within_support(posterior.prior, cand.reshape(-1, cand.shape[-1])).reshape(per_obs, -1)
+        # Accepted candidates fill the next free slots, in proposal order.
+        slot = torch.cumsum(ok, dim=0) - 1 + filled[todo]
+        i_idx, j_idx = (ok & (slot < n)).nonzero(as_tuple=True)
+        out[slot[i_idx, j_idx], todo[j_idx]] = cand[i_idx, j_idx]
+        proposed[todo] += per_obs
+        accepted[todo] += ok.sum(dim=0)
+        filled[todo] = torch.clamp(filled[todo] + ok.sum(dim=0), max=n)
+        todo = todo[filled[todo] < n]
+        if todo.numel() and int(proposed[todo].max()) > MAX_PROPOSALS_PER_OBSERVATION:
+            worst = int(todo[torch.argmax(proposed[todo])])
+            raise RuntimeError(
+                f"Observation {worst}: only {int(accepted[worst])} of {int(proposed[worst])} posterior "
+                "proposals fall inside the prior support"
+            )
+    return np.asarray(out.cpu().numpy(), dtype=np.float64)
 
 
 @torch.no_grad()

@@ -21,7 +21,7 @@ no API keys.
 | simulator | Hodgkin–Huxley neuron (Pospischil et al. 2008) with Na⁺, K⁺, slow M-type K⁺ and leak currents, membrane noise and a step current; vectorized exponential-Euler integrator verified against `scipy.integrate.solve_ivp` (LSODA) |
 | summary statistics | 12 standard electrophysiological features: spike count, resting potential mean/SD, stimulus-period mean/SD, first-spike latency, firing rate, AP threshold, amplitude, width, AHP depth, adaptation index |
 | prior | log-uniform on conductances, uniform on voltages |
-| inference | amortized NPE with the [`sbi`](https://github.com/sbi-dev/sbi) toolkit and PyTorch (neural spline flow); train once, infer on any number of new recordings |
+| inference | amortized NPE with the [`sbi`](https://github.com/sbi-dev/sbi) toolkit and PyTorch: an ensemble of 5 neural spline flows, whose mixture corrects the over-confidence of a single flow; train once, infer on any number of new recordings |
 | validation | SBC rank histograms + ECDF bands, KS/χ² uniformity tests, marginal and joint-HPD expected coverage, recovery of a known ground truth, amortized recovery statistics on 1000 held-out cells, posterior predictive checks |
 
 The method, the model and how to read every diagnostic are explained for
@@ -86,11 +86,11 @@ samples = loaded.posterior.sample((10_000,), x=x_o)  # log10 conductances, mV
 
 ## Configurations
 
-| config | simulations | estimator | SBC | purpose |
+| config | simulations | estimator (flows × size) | SBC | purpose |
 |---|---|---|---|---|
-| `tiny` | 300 | MAF, 2 × 16 | 30 × 50 | unit tests (seconds) |
-| `small` | 4,000 | MAF, 3 × 50 | 200 × 200 | default and CI smoke run of every stage |
-| `full` | 100,000 | NSF, 5 × 64 | 1000 × 1000 | the committed results |
+| `tiny` | 300 | 2 × MAF, 2 × 16 | 30 × 50 | unit tests (seconds) |
+| `small` | 4,000 | 3 × MAF, 3 × 50 | 200 × 200 | default and CI smoke run of every stage |
+| `full` | 100,000 | 5 × NSF, 5 × 64 | 1000 × 1000 | the committed results |
 
 The `small` budget is deliberately too small for publication-quality
 posteriors; its purpose is to exercise every stage end-to-end. Use `full` for
@@ -117,11 +117,15 @@ docs/             SCIENCE.md (method), RESULTS.md (results)
 
 ## Quality
 
-* `pytest` — 32 offline tests, ~30 s: integrator vs. scipy reference, resting
-  state as exact fixed point, feature extraction on traces with analytically
-  known features, diagnostics on a conjugate-Gaussian model with an exact
-  posterior (calibrated, over-, under-confident and biased cases), posterior
-  save/load round trip, and the full pipeline on the `tiny` config.
+* `pytest` — 42 offline tests, ~30 s:
+  * integrator vs. scipy reference; resting state as an exact fixed point
+  * feature extraction on traces with analytically known features
+  * diagnostics on a conjugate-Gaussian model with an exact posterior
+    (calibrated, over-, under-confident and biased cases)
+  * ensemble mixture density and sampling against analytic Gaussians, and
+    rejection sampling against the exact truncated normal
+  * trained flows bit-identical whether trained in sequence or in parallel
+  * posterior save/load round trip, and the full pipeline on the `tiny` config
 * `mypy --strict` and `ruff` clean.
 * GitHub Actions: lint, types and tests on Python 3.11 and 3.13, plus an
   end-to-end run of the `small` configuration whose report is posted as the

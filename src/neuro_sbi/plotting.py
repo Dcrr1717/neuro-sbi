@@ -391,8 +391,13 @@ def coverage_plot(
     n: int,
     labels: Sequence[str],
     path: str | Path,
+    member_joint: Sequence[FloatArray] = (),
 ) -> None:
-    """Expected coverage of marginal central intervals and joint HPD regions."""
+    """Expected coverage of marginal central intervals and joint HPD regions.
+
+    ``member_joint`` adds the joint coverage of each flow of an ensemble on
+    its own (thin grey lines) next to that of the ensemble.
+    """
     set_style()
     lo, hi = coverage_band(n, levels, alpha=0.05)
     fig, axes = plt.subplots(1, 2, figsize=(9.5, 4.2))
@@ -411,7 +416,17 @@ def coverage_plot(
     axes[0].set_ylabel("empirical coverage")
     axes[0].set_title("Marginal central credible intervals", loc="left")
     axes[0].legend(loc="upper left", fontsize=7)
-    axes[1].plot(levels, joint, color=POSTERIOR, linewidth=2.0)
+    for k, cov in enumerate(member_joint):
+        axes[1].plot(levels, cov, color=MUTED, linewidth=0.9, label="single flows" if k == 0 else None)
+    axes[1].plot(
+        levels,
+        joint,
+        color=POSTERIOR,
+        linewidth=2.0,
+        label=f"ensemble of {len(member_joint)} flows" if member_joint else None,
+    )
+    if member_joint:
+        axes[1].legend(loc="upper left", fontsize=8)
     axes[1].set_title("Joint highest-posterior-density regions", loc="left")
     axes[1].text(
         0.98,
@@ -487,28 +502,49 @@ def recovery_plot(
 
 
 def training_curve(
-    train: Sequence[float],
-    val: Sequence[float],
+    train: Sequence[Sequence[float]],
+    val: Sequence[Sequence[float]],
     path: str | Path,
-    phase_ends: Sequence[int] = (),
+    phase_ends: Sequence[Sequence[int]] = (),
     learning_rates: Sequence[float] = (),
 ) -> None:
-    """Mean log-density per epoch; dotted lines mark learning-rate decays."""
+    """Mean log-density per epoch for each flow of the ensemble.
+
+    One flow: training and validation curves, with dotted lines at the
+    learning-rate decays. Several flows: one colour per flow (validation
+    solid, training faint), with dots where each flow's learning rate decayed.
+    """
     set_style()
     fig, ax = plt.subplots(figsize=(5.8, 3.5))
-    ep = np.arange(1, len(train) + 1)
-    ax.plot(ep, -np.asarray(train), color=CATEGORICAL[0], label="training")
-    ax.plot(np.arange(1, len(val) + 1), -np.asarray(val), color=CATEGORICAL[1], label="validation")
-    lo = float(np.quantile(-np.asarray(val), 0.05))
-    hi = float(np.max(-np.asarray(val)))
-    ax.set_ylim(lo - 0.15 * (hi - lo), hi + 0.1 * (hi - lo))
-    for end, lr in zip(phase_ends[:-1], learning_rates[1:], strict=False):
-        ax.axvline(end + 0.5, color=MUTED, linestyle=":", linewidth=1.0)
-        ax.text(end + 1.5, lo - 0.1 * (hi - lo), f"lr → {lr:g}", fontsize=7.5, color=INK_2)
+    vals = [-np.asarray(v) for v in val]
+    trains = [-np.asarray(t) for t in train]
+    pooled = np.concatenate(vals)
+    lo = float(np.quantile(pooled, 0.05))
+    hi = float(max(np.max(pooled), *(np.max(t) for t in trains)))
+    ax.set_ylim(lo - 0.15 * (hi - lo), hi + 0.08 * (hi - lo))
+    if len(vals) == 1:
+        ax.plot(np.arange(1, trains[0].size + 1), trains[0], color=CATEGORICAL[0], label="training")
+        ax.plot(np.arange(1, vals[0].size + 1), vals[0], color=CATEGORICAL[1], label="validation")
+        ends = phase_ends[0] if phase_ends else ()
+        for end, lr in zip(ends[:-1], learning_rates[1:], strict=False):
+            ax.axvline(end + 0.5, color=MUTED, linestyle=":", linewidth=1.0)
+            ax.text(end + 1.5, lo - 0.1 * (hi - lo), f"lr → {lr:g}", fontsize=7.5, color=INK_2)
+        ax.set_title("NPE training curve", loc="left")
+    else:
+        for k, (t, v) in enumerate(zip(trains, vals, strict=True)):
+            color = CATEGORICAL[k % len(CATEGORICAL)]
+            ax.plot(np.arange(1, t.size + 1), t, color=color, linewidth=0.9, alpha=0.4)
+            ax.plot(np.arange(1, v.size + 1), v, color=color, linewidth=1.2, label=f"flow {k + 1}")
+            decays = np.asarray(phase_ends[k][:-1] if k < len(phase_ends) else (), dtype=int)
+            ax.plot(decays, v[decays - 1], "o", color=color, markersize=5, markeredgecolor=SURFACE)
+        ax.plot([], [], color=MUTED, linewidth=1.2, label="validation")
+        ax.plot([], [], color=MUTED, linewidth=0.9, alpha=0.4, label="training")
+        if any(len(e) > 1 for e in phase_ends):
+            ax.plot([], [], "o", color=MUTED, markersize=5, label="lr decay")
+        ax.set_title(f"NPE training curves ({len(vals)} flows)", loc="left")
     ax.set_xlabel("epoch")
     ax.set_ylabel("mean log q(θ | x)")
     ax.grid(True, axis="y")
-    ax.legend(loc="upper left")
-    ax.set_title("NPE training curve", loc="left")
+    ax.legend(loc="upper left", fontsize=7.5, ncol=2 if len(vals) > 1 else 1)
     fig.tight_layout()
     _save(fig, path)
