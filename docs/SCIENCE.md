@@ -166,9 +166,9 @@ $$q(\theta \mid x) = \frac{1}{K}\sum_{k=1}^{K} q_k(\theta \mid x).$$
 
 This is a *deep ensemble* (Lakshminarayanan, Pritzel & Blundell 2017). Where
 the flows agree, the mixture is as sharp as each of them. Where they
-disagree, which happens where the data are uninformative or the training
-signal was weak, the mixture covers all of their answers. The ensemble
-therefore puts the estimator's own uncertainty back into the posterior.
+disagree, the mixture covers all of their answers and is wider than any one
+of them. The ensemble therefore puts the estimator's own uncertainty back
+into the posterior.
 
 The `full` configuration uses K = 5, the CI configuration K = 3. Sampling
 from the mixture is exact: each draw picks a flow uniformly at random and
@@ -324,9 +324,12 @@ combination, not the individual values.
 * **Estimator error.** NPE is only asymptotically exact. Finite simulation
   budgets and finite training give approximation error, which is why the
   calibration checks are run and reported rather than assumed. Ensembling
-  (Section 4) corrects the over-confidence of single flows; it can overshoot
-  into conservative (too wide) regions, especially when the members are
-  weak, as in the deliberately under-budgeted `small` CI configuration.
+  (Section 4) corrects the over-confidence of single flows, but it can
+  overshoot into conservative (too wide) regions. In the committed `full`
+  run the marginal intervals end up calibrated and the joint regions
+  conservative. The effect is largest in spiking cells, where each flow's
+  posterior is narrow and small disagreements between flows matter most
+  ([RESULTS.md §3](RESULTS.md#3-calibration-sbc-and-expected-coverage)).
   Balanced NPE (Delaunoy et al. 2023) is an alternative that builds
   conservativeness into training. An ensemble of K flows costs K times the
   training of one; the flows train in parallel, so on K CPU cores the wall

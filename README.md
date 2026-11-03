@@ -35,12 +35,15 @@ committed run are in **[docs/RESULTS.md](docs/RESULTS.md)**.
   within a few per cent.
 * **Posterior predictive check:** 98 % of posterior-predictive simulations
   reproduce the observed spike count (prior: 7 %), and every feature falls at
-  a central predictive quantile (0.17–0.66).
-* **Calibration** (1000 held-out simulations): close to calibrated but
-  slightly over-confident. Marginal 95 % intervals cover the truth 91.5–93.7 %
-  of the time and the joint 95 % region 89.8 %. Five of six parameters pass
-  SBC rank uniformity; Eleak does not. Details and causes are in
-  [RESULTS.md §3](docs/RESULTS.md#3-calibration-sbc-and-expected-coverage).
+  a central predictive quantile (0.19–0.63).
+* **Calibration** (1000 held-out simulations): every single flow is
+  over-confident; its joint 95 % region holds the truth only about 90 % of
+  the time. The ensemble of five removes this. Its marginal 95 % intervals
+  cover the truth 94.8–96.2 % of the time, which is calibrated within sampling
+  error. Its joint regions err on the safe side: the 95 % region covers the
+  truth 98.2 % of the time. Five of six parameters pass SBC rank uniformity.
+  Eleak does not, because of a small bias that most flows share. Details are in
+  [RESULTS.md §3–4](docs/RESULTS.md#3-calibration-sbc-and-expected-coverage).
 * **Identifiability:** in cells that fire, gNa, gK and VT are pinned down
   (posterior contraction ≥ 0.998). gleak, gM and Eleak trade off along a
   compensation ridge.
@@ -63,8 +66,9 @@ neuro-sbi run --config full         # the committed run: 100k simulations, ~1.5 
 Outputs go to `results/<config>/` (`results/` for `full`): figures in
 `figures/`, all numbers in `metrics.json`, a readable `report.md`, the
 per-simulation SBC ranks and HPD levels in `sbc.npz`, and the trained posterior
-`posterior.pt`. Most of the `full` time is network training (about 88 min);
-simulating the 100k training cells takes about 1.5 min.
+`posterior.pt`. Most of the `full` time is network training (about 86 min for the five
+flows, trained in parallel); simulating the 100k training cells takes about
+1.5 min.
 
 Amortized inference with the committed posterior — one simulation, no
 retraining:
