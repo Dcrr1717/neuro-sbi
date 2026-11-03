@@ -152,6 +152,30 @@ Murray 2017). Flows can
 represent the skewed, banana-shaped and multimodal posteriors typical of
 degenerate neural models.
 
+**Ensembles against over-confidence.** A single flow trained on a finite
+simulation budget is typically *over-confident*: its credible regions are too
+small (Hermans et al. 2022). The cause is not a bug but estimation error. A
+flow is fitted by maximum likelihood, and it is never told how uncertain its
+own fit is.
+
+We therefore train several flows that differ only in their random seed,
+which sets the initial weights, the train/validation split and the order of
+mini-batches. We use their equal-weight mixture as the posterior:
+
+$$q(\theta \mid x) = \frac{1}{K}\sum_{k=1}^{K} q_k(\theta \mid x).$$
+
+This is a *deep ensemble* (Lakshminarayanan, Pritzel & Blundell 2017). Where
+the flows agree, the mixture is as sharp as each of them. Where they
+disagree, the mixture covers all of their answers and is wider than any one
+of them. The ensemble therefore puts the estimator's own uncertainty back
+into the posterior.
+
+The `full` configuration uses K = 5, the CI configuration K = 3. Sampling
+from the mixture is exact: each draw picks a flow uniformly at random and
+samples from it. Its density, which the coverage checks below need, is the
+average of the flows' densities. The flows train in parallel processes, one
+CPU thread each, and the result does not depend on how many run at once.
+
 Implementation details (all via the `sbi` toolkit; Tejero-Cantero et al. 2020):
 
 * Features are standardised, with the heavy-tailed resting-potential SD
@@ -163,9 +187,10 @@ Implementation details (all via the `sbi` toolkit; Tejero-Cantero et al. 2020):
   weights at a lower learning rate (5·10⁻⁴ → 10⁻⁴ → 2·10⁻⁵). The validation
   log-density of a single learning rate is too noisy for the stopping rule to
   see the slow, steady gains that the lower rates pick up.
-* The flow has unbounded support while the prior is a box; samples outside
+* The flows have unbounded support while the prior is a box. Samples outside
   the prior are rejected, which is exactly the truncation the true posterior
-  has.
+  has. For each observation, proposals continue until enough samples are
+  accepted.
 * Every stage (training simulations, network seed, observation noise, SBC
   simulations, predictive simulations, posterior sampling) draws from its own
   seeded random stream, so the run is reproducible and the validation
@@ -218,7 +243,9 @@ higher density than $\theta^*$. The joint check also tests the *dependencies*
 between parameters, which marginal SBC cannot see. Curves above the diagonal
 indicate conservative (too wide) posteriors, curves below over-confident ones;
 Hermans et al. (2022) argue that for scientific use, conservative is the
-acceptable failure mode.
+acceptable failure mode. For an ensemble, the joint panel also shows every
+flow on its own (grey lines): the gap between them and the ensemble is what
+the mixture adds.
 
 ### 5.3 Parameter recovery: does the data constrain the parameters?
 
@@ -296,13 +323,17 @@ combination, not the individual values.
   dominated by their prior; their posteriors should not be over-interpreted.
 * **Estimator error.** NPE is only asymptotically exact. Finite simulation
   budgets and finite training give approximation error, which is why the
-  calibration checks are run and reported rather than assumed. The committed
-  `full` posterior is slightly over-confident (its nominal 95 % joint region
-  covers the truth 90 % of the time; see [RESULTS.md](RESULTS.md)). Ensembles
-  of independently trained flows (Hermans et al. 2022) and balanced NPE
-  (Delaunoy et al. 2023) are the standard remedies. The `small` CI
-  configuration is deliberately under-budgeted and is expected to show some
-  miscalibration.
+  calibration checks are run and reported rather than assumed. Ensembling
+  (Section 4) corrects the over-confidence of single flows, but it can
+  overshoot into conservative (too wide) regions. In the committed `full`
+  run the marginal intervals end up calibrated and the joint regions
+  conservative. The effect is largest in spiking cells, where each flow's
+  posterior is narrow and small disagreements between flows matter most
+  ([RESULTS.md §3](RESULTS.md#3-calibration-sbc-and-expected-coverage)).
+  Balanced NPE (Delaunoy et al. 2023) is an alternative that builds
+  conservativeness into training. An ensemble of K flows costs K times the
+  training of one; the flows train in parallel, so on K CPU cores the wall
+  time is about that of a single flow.
 
 ## References
 
@@ -329,6 +360,8 @@ combination, not the individual values.
 * Hodgkin AL, Huxley AF (1952). A quantitative description of membrane current
   and its application to conduction and excitation in nerve. *J Physiol*
   117(4):500–544.
+* Lakshminarayanan B, Pritzel A, Blundell C (2017). Simple and scalable
+  predictive uncertainty estimation using deep ensembles. *NeurIPS* 30.
 * Lueckmann J-M, Gonçalves PJ, Bassetto G, Öcal K, Nonnenmacher M, Macke JH
   (2017). Flexible statistical inference for mechanistic models of neural
   dynamics. *NeurIPS* 30.

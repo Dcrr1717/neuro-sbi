@@ -26,17 +26,36 @@ def render_report(m: dict[str, Any]) -> str:
         f"({100 * m['training_data']['fraction_spiking']:.1f} % fire at least one AP)"
     )
     te = cfg["training"]
-    add(
-        f"- Density estimator: **{te['density_estimator'].upper()}**, "
-        f"{te['num_transforms']} transforms x {te['hidden_features']} hidden units "
-        f"({tr['num_parameters']:,} weights); {tr['epochs_trained']} epochs, "
-        f"best validation log q(θ|x) = {-tr['best_validation_loss']:.3f}"
-    )
-    if len(tr.get("learning_rates", [])) > 1:
-        phases = ", ".join(
-            f"{lr:g} (until epoch {end})"
-            for lr, end in zip(tr["learning_rates"], tr["phase_end_epochs"], strict=True)
+    members = tr["members"]
+    arch = f"{te['num_transforms']} transforms x {te['hidden_features']} hidden units"
+    est = te["density_estimator"].upper()
+    if len(members) == 1:
+        m0 = members[0]
+        add(
+            f"- Density estimator: **{est}**, {arch} ({tr['num_parameters']:,} weights); "
+            f"{m0['epochs_trained']} epochs, "
+            f"best validation log q(θ|x) = {m0['best_validation_log_prob']:.3f}"
         )
+    else:
+        add(
+            f"- Density estimator: **equal-weight ensemble of {len(members)} {est}s** differing only in "
+            f"their random seed, each {arch} ({members[0]['num_parameters']:,} weights)"
+        )
+        add(
+            "- Epochs per flow: "
+            + ", ".join(str(m["epochs_trained"]) for m in members)
+            + "; best validation log q(θ|x) per flow: "
+            + ", ".join(f"{m['best_validation_log_prob']:.3f}" for m in members)
+        )
+    lrs = tr["learning_rates"]
+    if len(lrs) > 1:
+        if len(members) == 1:
+            phases = ", ".join(
+                f"{lr:g} (until epoch {end})"
+                for lr, end in zip(lrs, members[0]["phase_end_epochs"], strict=True)
+            )
+        else:
+            phases = " → ".join(f"{lr:g}" for lr in lrs)
         add(f"- Learning-rate annealing on plateau: {phases}")
     add(f"- Inferred parameters: {', '.join(m['parameter_labels'])}")
     t = m["timings_sec"]
@@ -104,6 +123,41 @@ def render_report(m: dict[str, Any]) -> str:
             f"90 % → {c['0.90']:.3f}, 95 % → {c['0.95']:.3f}"
         )
     add("")
+    if sbc.get("members"):
+        add("### Ensemble vs. its individual flows (same simulations)\n")
+        add(
+            "| posterior | held-out log q(θ*\\|x) | joint HPD coverage 50 / 80 / 90 / 95 % "
+            "| marginal 95 % coverage (min–max) | parameters passing SBC |"
+        )
+        add("|---|---|---|---|---|")
+
+        def row(name: str, lp: float, jc: dict[str, float], m95: list[float], n_ok: int) -> str:
+            joint = " / ".join(f"{jc[k]:.3f}" for k in ("0.50", "0.80", "0.90", "0.95"))
+            return f"| {name} | {lp:.3f} | {joint} | {min(m95):.3f}–{max(m95):.3f} | {n_ok} of {len(m95)} |"
+
+        for k, mem in enumerate(sbc["members"]):
+            add(
+                row(
+                    f"flow {k + 1}",
+                    mem["heldout_log_prob"],
+                    mem["joint_hpd_coverage"],
+                    list(mem["marginal_coverage_95"].values()),
+                    mem["num_uniform_at_bonferroni"],
+                )
+            )
+        add(
+            row(
+                "**ensemble**",
+                sbc["heldout_log_prob"],
+                sbc["joint_hpd_coverage"],
+                list(sbc["marginal_coverage"]["0.95"].values()),
+                sum(t["uniform_at_bonferroni_0.05"] for t in sbc["per_parameter"].values()),
+            )
+        )
+        add(
+            "\nHeld-out log q(θ*|x): mean log-density of the true parameters under the "
+            "(untruncated) flow or mixture; higher is better.\n"
+        )
 
     add("## Amortized recovery on the same held-out simulations\n")
     add("| parameter | contraction | r(mean, truth) | NRMSE | z mean | z sd | 95 % coverage |")

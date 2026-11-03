@@ -33,6 +33,13 @@ class TrainingConfig:
     validation_fraction: float = 0.1
     stop_after_epochs: int = 20
     max_num_epochs: int = 1000
+    # Number of independently initialized flows whose equal-weight mixture is
+    # the posterior (deep ensemble; 1 = a single flow).
+    ensemble_size: int = 1
+
+    def __post_init__(self) -> None:
+        if self.ensemble_size < 1:
+            raise ValueError("ensemble_size must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -76,6 +83,7 @@ TINY = PipelineConfig(
         lr_decay=(3e-4,),
         stop_after_epochs=3,
         max_num_epochs=5,
+        ensemble_size=2,
     ),
     diagnostics=DiagnosticsConfig(
         num_sbc=30,
@@ -100,6 +108,7 @@ SMALL = PipelineConfig(
         learning_rate=1e-3,
         stop_after_epochs=15,
         max_num_epochs=300,
+        ensemble_size=3,
     ),
     diagnostics=DiagnosticsConfig(
         num_sbc=200,
@@ -123,6 +132,7 @@ FULL = PipelineConfig(
         lr_decay=(1e-4, 2e-5),
         stop_after_epochs=20,
         max_num_epochs=1000,
+        ensemble_size=5,
     ),
     diagnostics=DiagnosticsConfig(
         num_sbc=1000,
